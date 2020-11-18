@@ -109,8 +109,7 @@ class UserSyncEventSubscriber implements EventSubscriberInterface {
 
   public function onUserSync(SamlauthUserSyncEvent $event) {
     $session = \Drupal::service('session');
-    $samlToken = $session->get('samlauth_token');
-    $samlEmail = $session->get('samlauth_email');
+    $samlFullname = $session->get('samlauth_fullname');
     // If the account is new, we are in the middle of a user save operation;
     // the current user name is 'samlauth_AUTHNAME' (as set by externalauth) and
     // e-mail is not set yet.
@@ -121,7 +120,11 @@ class UserSyncEventSubscriber implements EventSubscriberInterface {
     if ($account->isNew() || $this->config->get('sync_name')) {
       // Get value from the SAML attribute whose name is configured in the
       // samlauth module.
-      $name = $this->getAttributeByConfig('user_name_attribute', $event);
+      if($samlFullname) {
+        $name = $samlFullname;
+      } else {
+        $name = $this->getAttributeByConfig('user_name_attribute', $event);
+      }
       if ($name && $name != $account->getAccountName()) {
         // Validate the username. This shouldn't be necessary to mitigate
         // attacks; assuming our SAML setup is correct, noone can insert fake

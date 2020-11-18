@@ -162,13 +162,49 @@ class SamlService {
    *   parameters.
    */
   public function logout($return_to = NULL, $parameters = []) {
+    // Log the Drupal user out at the start of the process if they were still
+    // logged in. Official SAML documentation usually specifies (as far as it
+    // does) that we should log the user out after getting redirected from the
+    // IdP instead, at /saml/sls. However
+    // - Between calling logout() and all those redirects there is a lot that
+    //   could go wrong which would then influence users' ability to log out of
+    //   Drupal.
+    // - There's no real downside to doing it now, either for the user or for
+    //   our code (which already explicitly supports handling users who were
+    //   previously logged out of Drupal).
+    // - Site administrators may also want this endpoint to work for logging
+    //   out non-SAML users. (Otherwise how are they going to display
+    //   different login links for different users?) PLEASE NOTE however, that
+    //   this is not the primary purpose of this method; it is to enable both
+    //   logged-in and already-logged-out Drupal users to start a SAML logout
+    //   process - i.e. to be redirected to the IdP. So a side effect is that
+    //   non-SAML users are also redirected to the IdP unnecessarily. It may be
+    //   possible to prevent this - but that will need to be tested carefully.
+    $saml_session_data = $this->drupalLogoutHelper();
+  
+    // Start the SAML logout process. If the user was already logged out before
+    // this method was called, we won't have any SAML session data so won't be
+    // able to tell the IdP which session should be logging out. Even so, the
+    // SAML Toolkit is able to create a generic LogoutRequest, and for at least
+    // some IdPs that's enough to log the user out from the IdP if applicable
+    // (because they have their own browser/cookie based session handling) and
+    // return a SAMLResponse indicating success. (Maybe there's some way to
+    // modify the Drupal logout process to keep the SAML session data available
+    // but we won't explore that until there's a practical situation where
+    // that's clearly needed.)
+    // @todo should we check session expiration time before sending a logout
+    //   request to the IdP? (What would an IdP do if it received an old
+    //   session index? Is it better to not redirect, and throw an error on
+    //   our side?)
+    // @todo include nameId(SP)NameQualifier?
+  
     $url = $this->getSamlAuth()->logout(
       $return_to,
       $parameters,
-      $this->tempStoreFactory->get('name_id'),
-      $this->tempStoreFactory->get('session_index'),
+      $saml_session_data['name_id'] ?? NULL,
+      $saml_session_data['session_index'] ?? NULL,
       TRUE,
-      $this->tempStoreFactory->get('name_id_format')
+      $saml_session_data['name_id_format'] ?? NULL
     );
     if ($this->config->get('debug_log_saml_out')) {
       $this->logger->debug('Sending SAML logout request: <pre>@message</pre>', ['@message' => $this->getSamlAuth()->getLastRequestXML()]);
@@ -219,6 +255,7 @@ class SamlService {
         $session = \Drupal::request()->getSession();
         $session->set('samlauth_token', $response->data->token);
         $session->set('samlauth_email', base64_decode($response->data->email));
+        $session->set('samlauth_fullname', $response->data->fullname);
         }
      }  
      catch (ClientException $e) {
@@ -342,7 +379,7 @@ class SamlService {
       }
     }
   }
-
+  
   /**
    * Does processing for the Single Logout Service.
    *
@@ -375,12 +412,19 @@ class SamlService {
         $this->logger->warning("HTTP request to SLS is not a GET request, or contains no 'SAMLResponse'/'SAMLRequest' parameters.");
       }
     }
-
-    // This call can either set an error condition or throw a
-    // \OneLogin_Saml2_Error exception, depending on whether or not we are
-    // processing a POST request. Don't catch the exception.
-    $url = $this->getSamlAuth()->processSLO(FALSE, NULL, (bool) $this->config->get('security_logout_reuse_sigs'), NULL, TRUE);
-
+    
+    // Unlike the 'logout()' route, we only log the user out if we have a valid
+    // request/response, so first have the SAML Toolkit check things. Don't
+    // have it do any session actions, because nothing is needed besides our
+    // own logout actions (if any). This call can either set an error condition
+    // or throw a \OneLogin_Saml2_Error, depending on whether we are processing
+    // a POST request; don't catch anything.
+    // @todo should we check a LogoutResponse against the ID of the
+    //   LogoutRequest we sent earlier? Seems to be not absolutely required on
+    //   top of the validity / signature checks which the library already does
+    //   - but every extra check is good. Maybe make it optional.
+    $url = $this->getSamlAuth()->processSLO(TRUE, NULL, (bool) $this->config->get('security_logout_reuse_sigs'), NULL, TRUE);
+    
     if ($this->config->get('debug_log_saml_in')) {
       // There should be no way we can get here if nether GET parameter is set;
       // if nothing gets logged, that's a bug.
@@ -398,21 +442,20 @@ class SamlService {
       // 'reason' for the last error.
       throw new RuntimeException('Error(s) encountered during processing of SLS response. Type(s): ' . implode(', ', array_unique($errors)) . '; reason given for last error: ' . $this->getSamlAuth()->getLastErrorReason());
     }
-
-    // Usually we don't get any URL returned. The case in which we do, seems to
-    // be something like IdP-initiated logout. Therefore we won't do further
-    // processing.
-    if (!$url) {
-      // Delete private stored session information.
-      foreach (['session_index', 'session_expiration'] as $key) {
-        $this->tempStoreFactory->delete($key);
-      }
-      user_logout();
-    }
-
+    
+    // Remove SAML session data, log the user out of Drupal, and return a
+    // redirect URL if we got any. Usually,
+    // - a LogoutRequest means we need to log out and redirect back to the IdP,
+    //   for which the SAML Toolkit returned a URL.
+    // - after a LogoutResponse we don't need to log out because we already did
+    //   that at the start of the process, in logout() - but there's nothing
+    //   against checking. We did not get an URL returned and our caller can
+    //   decide what to do next.
+    $this->drupalLogoutHelper();
+    
     return $url;
   }
-
+  
   /**
    * Synchronizes user data with attributes in the SAML request.
    *
@@ -425,12 +468,12 @@ class SamlService {
     // Dispatch a user_sync event.
     $event = new SamlauthUserSyncEvent($account, $this->getAttributes());
     $this->eventDispatcher->dispatch(SamlauthEvents::USER_SYNC, $event);
-
+    
     if (!$skip_save && $event->isAccountChanged()) {
       $account->save();
     }
   }
-
+  
   /**
    * Returns all attributes in a SAML response.
    *
@@ -443,7 +486,7 @@ class SamlService {
   public function getAttributes() {
     return $this->getSamlAuth()->getAttributes();
   }
-
+  
   /**
    * Returns value from a SAML attribute whose name is configured in our module.
    *
@@ -467,14 +510,14 @@ class SamlService {
       }
     }
   }
-
+  
   /**
    * @return bool if a valid user was fetched from the saml assertion this request.
    */
   protected function isAuthenticated() {
     return $this->getSamlAuth()->isAuthenticated();
   }
-
+  
   /**
    * Returns an initialized Auth class from the SAML Toolkit.
    */
@@ -482,10 +525,102 @@ class SamlService {
     if (!isset($this->samlAuth)) {
       $this->samlAuth = new Auth(static::reformatConfig($this->config));
     }
-
+    
     return $this->samlAuth;
   }
-
+  
+  /**
+   * Ensures the user is logged out from Drupal; returns SAML session data.
+   *
+   * @param bool $delete_saml_session_data
+   *   (optional) whether to delete the SAML session data. This depends on:
+   *   - how bad (privacy sensitive) it is to keep around? Answer: not.
+   *   - whether we expect the data to ever be reused. That is: could a SAML
+   *     logout attempt be done for the same SAML session multiple times?
+   *     Answer: we don't know. Unlikely, because it is not accessible anymore
+   *     after logout, so the user would need to log in to Drupal locally again
+   *     before anything could be done with it.
+   *
+   * @return array
+   *   Array of data about the 'SAML session' that we stored at login. (The
+   *   SAML toolkit itself does not store any data / implement the concept of a
+   *   session.)
+   */
+  protected function drupalLogoutHelper($delete_saml_session_data = TRUE) {
+    $data = [];
+    
+    if (\Drupal::currentUser()->isAuthenticated()) {
+      // Get data from our temp store which is not accessible after logout.
+      // DEVELOPER NOTE: It depends on our session storage, whether we want to
+      // try this for unauthenticated users too. At the moment, we are sure
+      // only authenticated users have any SAML session data - and trying to
+      // get() a value from our privateTempStore can unnecessarily start a new
+      // PHP session for unauthenticated users.
+      foreach (['session_index', 'session_expiration', 'name_id', 'name_id_format'] as $key) {
+        $data[$key] = $this->getSamlSessionValue($key);
+        if ($delete_saml_session_data) {
+          $this->deleteSamlSessionValue($key);
+        }
+      }
+      
+      user_logout();
+    }
+    
+    return $data;
+  }
+  
+  /**
+   * Retrieves a value from the SAML session for a given key.
+   *
+   * @param string $key
+   *   The key of the data to retrieve.
+   *
+   * @param $name
+   *
+   * @return mixed|null
+   */
+  protected function getSamlSessionValue($key) {
+    if (static::SAML_SESSION_IN_GLOBAL_SESSION) {
+      return $_SESSION['samlauth'][$key] ?? NULL;
+    }
+    return $this->privateTempStore->get($key);
+  }
+  
+  /**
+   * Stores a particular key/value pair in this PrivateTempStore.
+   *
+   * @param string $key
+   *   The key of the data to store.
+   * @param mixed $value
+   *   The data to store.
+   */
+  protected function setSamlSessionValue($key, $value) {
+    if (static::SAML_SESSION_IN_GLOBAL_SESSION) {
+      $_SESSION['samlauth'][$key] = $value;
+    }
+    else {
+      $this->privateTempStore->set($key, $value);
+    }
+  }
+  
+  /**
+   * Deletes data from the SAML session.
+   *
+   * @param string $key
+   *   The key of the data to delete.
+   */
+  protected function deleteSamlSessionValue($key) {
+    if (static::SAML_SESSION_IN_GLOBAL_SESSION) {
+      unset($_SESSION['samlauth'][$key]);
+      if (empty($_SESSION['samlauth'])) {
+        unset($_SESSION['samlauth']);
+      }
+    }
+    else {
+      $this->privateTempStore->delete($key);
+    }
+  }
+  
   /**
    * Returns a configuration array as used by the external library.
    *
@@ -513,7 +648,7 @@ class SamlService {
       $sp_cert = $config->get('sp_x509_certificate');
       $sp_key = $config->get('sp_private_key');
     }
-
+    
     $library_config = [
       'debug' => (bool) $config->get('debug_phpsaml'),
       'sp' => [
@@ -558,7 +693,7 @@ class SamlService {
       ],
       'strict' => (bool) $config->get('strict'),
     ];
-
+    
     // Check for the presence of a multi cert situation.
     $multi = $config->get('idp_cert_type');
     switch ($multi) {
@@ -570,7 +705,7 @@ class SamlService {
           ],
         ];
         break;
-
+      
       case "encryption":
         $library_config['idp']['x509certMulti'] = [
           'signing' => [
@@ -582,8 +717,8 @@ class SamlService {
         ];
         break;
     }
-
+    
     return $library_config;
   }
-
+  
 }
