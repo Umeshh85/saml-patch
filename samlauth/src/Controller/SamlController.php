@@ -176,11 +176,6 @@ class SamlController extends ControllerBase {
       $this->saml->acs();
       $url = $this->getRedirectUrlAfterProcessing(TRUE);
     }
-    catch (UserVisibleException $e) {
-      $this->getLogger('samlauth')->warning($e->getMessage());
-      \Drupal::messenger()->addError($e->getMessage());
-      $url = Url::fromRoute('<front>');
-    }
     catch (Exception $e) {
       $this->handleException($e, 'processing SAML authentication response');
       $url = Url::fromRoute('<front>');
@@ -203,11 +198,6 @@ class SamlController extends ControllerBase {
       if (!$url) {
         $url = $this->getRedirectUrlAfterProcessing();
       }
-    }
-    catch (UserVisibleException $e) {
-      $this->getLogger('samlauth')->warning($e->getMessage());
-      \Drupal::messenger()->addError($e->getMessage());
-      $url = Url::fromRoute('<front>');
     }
     catch (Exception $e) {
       $this->handleException($e, 'processing SAML single-logout response');
@@ -413,7 +403,7 @@ class SamlController extends ControllerBase {
   }
 
   /**
-   * Displays error message and logs full exception.
+   * Displays and/or logs exception message.
    *
    * @param $exception
    *   The exception thrown.
@@ -421,18 +411,28 @@ class SamlController extends ControllerBase {
    *   A description of when the error was encountered.
    */
   protected function handleException($exception, $while = '') {
-    if ($while) {
-      $while = " while $while";
+    if ($exception instanceof UserVisibleException || $this->config->get('debug_display_error_details')) {
+      // Show the full error on screen; also log, but with lowered severity.
+      // Assume we don't need the "while" part for a user visible error because
+      // it's likely not fully correct.
+      \Drupal::messenger()->addError($exception->getMessage());
+      $this->getLogger('samlauth')->warning($exception->getMessage());
     }
-    // We use the same format for logging as Drupal's ExceptionLoggingSubscriber
-    // except we also specify where the error was encountered. (The options are
-    // limited, so we make this part of the message, not a context parameter.)
-    $error = Error::decodeException($exception);
-    unset($error['severity_level']);
-    $this->getLogger('samlauth')->critical("%type encountered$while: @message in %function (line %line of %file).", $error);
-    // Don't expose the error to prevent information leakage; the user probably
-    // can't do much with it anyway. But hint that more details are available.
-    \Drupal::messenger()->addError("Error encountered{$while}; details have been logged.");
+    else {
+      // Use the same format for logging as Drupal's ExceptionLoggingSubscriber
+      // except also specify where the error was encountered. (The options for
+      // the "while" part are limited, so we make this part of the message
+      // rather than a context parameter.)
+      if ($while) {
+        $while = " while $while";
+      }
+      $error = Error::decodeException($exception);
+      unset($error['severity_level']);
+      $this->getLogger('samlauth')->critical("%type encountered$while: @message in %function (line %line of %file).", $error);
+      // Don't expose the error to prevent information leakage; the user probably
+      // can't do much with it anyway. But hint that more details are available.
+      \Drupal::messenger()->addError("Error encountered{$while}; details have been logged.");
+    }
   }
 
 }

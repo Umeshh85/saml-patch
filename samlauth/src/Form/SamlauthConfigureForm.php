@@ -8,6 +8,7 @@ use Drupal\Core\Form\FormStateInterface;
 use Drupal\Core\Path\PathValidatorInterface;
 use Drupal\Core\Url;
 use Drupal\Core\Utility\Token;
+use OneLogin\Saml2\Utils as SamlUtils;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
 /**
@@ -173,8 +174,8 @@ class SamlauthConfigureForm extends ConfigFormBase {
     $form['service_provider']['sp_x509_certificate'] = [
       '#type' => 'textarea',
       '#title' => $this->t('x509 Certificate'),
-      '#description' => $this->t('Public x509 certificate of the SP. No line breaks or BEGIN CERTIFICATE or END CERTIFICATE lines.'),
-      '#default_value' => $config->get('sp_x509_certificate'),
+      '#description' => $this->t("Public x509 certificate for the SP; line breaks and '-----BEGIN/END' lines are optional."),
+      '#default_value' => $this->formatKeyOrCert($config->get('sp_x509_certificate'), TRUE),
       '#states' => [
         'visible' => [
           ':input[name="sp_cert_type"]' => ['value' => 'fields'],
@@ -185,8 +186,8 @@ class SamlauthConfigureForm extends ConfigFormBase {
     $form['service_provider']['sp_private_key'] = [
       '#type' => 'textarea',
       '#title' => $this->t('Private Key'),
-      '#description' => $this->t('Private key for SP. No line breaks or BEGIN CERTIFICATE or END CERTIFICATE lines.'),
-      '#default_value' => $config->get('sp_private_key'),
+      '#description' => $this->t("Private key for the SP; line breaks and '-----BEGIN/END' lines are optional."),
+      '#default_value' => $this->formatKeyOrCert($config->get('sp_private_key'), TRUE, TRUE),
       '#states' => [
         'visible' => [
           ':input[name="sp_cert_type"]' => ['value' => 'fields'],
@@ -261,15 +262,15 @@ class SamlauthConfigureForm extends ConfigFormBase {
     $form['identity_provider']['idp_x509_certificate'] = [
       '#type' => 'textarea',
       '#title' => $this->t('Primary x509 Certificate'),
-      '#description' => $this->t('Public x509 certificate of the IdP. The external SAML Toolkit library does not allow configuring this as a separate file.'),
-      '#default_value' => $config->get('idp_x509_certificate'),
+      '#description' => $this->t("Public x509 certificate of the IdP; line breaks and '-----BEGIN/END' lines are optional. (The external SAML Toolkit library does not allow configuring this as a separate file.)"),
+      '#default_value' => $this->formatKeyOrCert($config->get('idp_x509_certificate'), TRUE),
     ];
 
     $form['identity_provider']['idp_x509_certificate_multi'] = [
       '#type' => 'textarea',
       '#title' => $this->t('Secondary x509 Certificate'),
       '#description' => $this->t('Secondary public x509 certificate of the IdP. This is a signing key if using "Key Rollover Phase" and an encryption key if using "Unique Signing/Encryption."'),
-      '#default_value' => $config->get('idp_x509_certificate_multi'),
+      '#default_value' => $this->formatKeyOrCert($config->get('idp_x509_certificate_multi'), TRUE),
       '#states' => [
         'invisible' => [
           ':input[name="idp_cert_type"]' => ['value' => 'single'],
@@ -482,6 +483,18 @@ class SamlauthConfigureForm extends ConfigFormBase {
       '#default_value' => $config->get('security_assertions_encrypt'),
     ];
 
+    $form['other'] = [
+      '#title' => $this->t('Other'),
+      '#type' => 'fieldset',
+    ];
+
+    $form['other']['use_proxy_headers'] = array(
+      '#type' => 'checkbox',
+      '#title' => $this->t("Use 'X-Forwarded-*' headers."),
+      '#description' => $this->t("The SAML Toolkit will use 'X-Forwarded-*' HTTP headers (if present) for constructing/identifying the SP URL in sent/received messages. This is likely necessary if your SP is behind a reverse proxy, and your Drupal installation is not already <a href=\"https://www.drupal.org/node/425990\" target=\"_blank\">dealing with this</a>."),
+      '#default_value' => $config->get('use_proxy_headers'),
+    );
+
     $form['debugging'] = [
       '#title' => $this->t('Debugging'),
       '#type' => 'fieldset',
@@ -516,6 +529,13 @@ class SamlauthConfigureForm extends ConfigFormBase {
           ':input[name="security_logout_responses_sign"]' => ['checked' => FALSE],
         ],
       ],
+    ];
+
+    $form['debugging']['debug_display_error_details'] = [
+      '#type' => 'checkbox',
+      '#title' => $this->t("Show detailed errors to the user"),
+      '#description' => $this->t("This can help testing until SAML login/logout works. (Technical details about failed SAML login/logout are only logged to watchdog by default, to prevent exposing information about a misconfigured system / because it's unlikely they are useful.)"),
+      '#default_value' => $config->get('debug_display_error_details'),
     ];
 
     $form['debugging']['debug_log_saml_out'] = [
@@ -604,8 +624,8 @@ class SamlauthConfigureForm extends ConfigFormBase {
       $sp_cert_folder = $this->fixFolderPath($form_state->getValue('sp_cert_folder'));
     }
     else {
-      $sp_x509_certificate = $form_state->getValue('sp_x509_certificate');
-      $sp_private_key = $form_state->getValue('sp_private_key');
+      $sp_x509_certificate =  $this->formatKeyOrCert($form_state->getValue('sp_x509_certificate'), FALSE);
+      $sp_private_key =  $this->formatKeyOrCert($form_state->getValue('sp_private_key'), FALSE, TRUE);
     }
 
     $this->config('samlauth.authentication')
@@ -624,8 +644,8 @@ class SamlauthConfigureForm extends ConfigFormBase {
       ->set('idp_single_log_out_service', $form_state->getValue('idp_single_log_out_service'))
       ->set('idp_change_password_service', $form_state->getValue('idp_change_password_service'))
       ->set('idp_cert_type', $form_state->getValue('idp_cert_type'))
-      ->set('idp_x509_certificate', $form_state->getValue('idp_x509_certificate'))
-      ->set('idp_x509_certificate_multi', $form_state->getValue('idp_x509_certificate_multi'))
+      ->set('idp_x509_certificate', $this->formatKeyOrCert($form_state->getValue('idp_x509_certificate'), FALSE))
+      ->set('idp_x509_certificate_multi', $this->formatKeyOrCert($form_state->getValue('idp_x509_certificate_multi'), FALSE))
       ->set('unique_id_attribute', $form_state->getValue('unique_id_attribute'))
       ->set('map_users', $form_state->getValue('map_users'))
       ->set('create_users', $form_state->getValue('create_users'))
@@ -645,6 +665,8 @@ class SamlauthConfigureForm extends ConfigFormBase {
       ->set('security_request_authn_context', $form_state->getValue('security_request_authn_context'))
       ->set('security_signature_algorithm', $form_state->getValue('security_signature_algorithm'))
       ->set('strict', $form_state->getValue('strict'))
+      ->set('use_proxy_headers', $form_state->getValue('use_proxy_headers'))
+      ->set('debug_display_error_details', $form_state->getValue('debug_display_error_details'))
       ->set('debug_log_saml_out', $form_state->getValue('debug_log_saml_out'))
       ->set('debug_log_saml_in', $form_state->getValue('debug_log_saml_in'))
       ->set('debug_log_in', $form_state->getValue('debug_log_in'))
@@ -653,9 +675,41 @@ class SamlauthConfigureForm extends ConfigFormBase {
   }
 
   /**
+   * Format a long string in PEM format, or remove PEM format.
+   *
+   * Our configuration stores unformatted key/cert values, which is what we
+   * would get from SAML metadata and what the SAML toolkit expects. But
+   * displaying them formatted in a textbox is better for humans, and also
+   * allows us to paste PEM-formatted values (as well as unformatted) into the
+   * textbox and not have to remove all the newlines manually, if we got them
+   * delivered this way.
+   *
+   * The side effect is that certificates/keys are re--un-formatted on every
+   * save operation, but that should be OK.
+   *
+   * @param string|null $value
+   *   A certificate or private key, either with or without head/footer.
+   * @param bool $heads
+   *   True to format and include head and footer; False to remove them and
+   *   return one string without spaces / line breaks.
+   * @param bool $key
+   *   (optional) True if this is a private key rather than a certificate.
+   *
+   * @return string $rsaKey Formatted private key
+   */
+  protected function formatKeyOrCert($value, $heads, $key = FALSE) {
+    if (is_string($value)) { //@TODO FIX LIKELY BUG test
+      $value = $key ?
+        SamlUtils::formatPrivateKey($value, $heads) :
+        SamlUtils::formatCert($value, $heads);
+    }
+    return $value;
+  }
+
+  /**
    * Remove trailing slash from a folder name, to unify config values.
    */
-  private function fixFolderPath($path) {
+  protected function fixFolderPath($path) {
     if ($path) {
       $path = rtrim($path, '/');
     }

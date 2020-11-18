@@ -17,12 +17,20 @@ use OneLogin\Saml2\Auth;
 use OneLogin\Saml2\Error;
 use Psr\Log\LoggerInterface;
 use RuntimeException;
+use GuzzleHttp\ClientInterface;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 
 /**
  * Governs communication between the SAML toolkit and the IdP / login behavior.
  */
 class SamlService {
+    /**
+   * The http client service.
+   *
+   * @var \GuzzleHttp\ClientInterface
+   */
+  protected $httpClient;
+
 
   /**
    * An Auth object representing the current request state.
@@ -89,7 +97,8 @@ class SamlService {
    * @param \Drupal\Core\TempStore\PrivateTempStoreFactory $temp_store_factory
    *   A temp data store factory object.
    */
-  public function __construct(ExternalAuth $external_auth, ConfigFactoryInterface $config_factory, EntityTypeManagerInterface $entity_type_manager, LoggerInterface $logger, EventDispatcherInterface $event_dispatcher, PrivateTempStoreFactory $temp_store_factory) {
+  public function __construct(ClientInterface $http_client,ExternalAuth $external_auth, ConfigFactoryInterface $config_factory, EntityTypeManagerInterface $entity_type_manager, LoggerInterface $logger, EventDispatcherInterface $event_dispatcher, PrivateTempStoreFactory $temp_store_factory) {
+    $this->httpClient = $http_client;
     $this->externalAuth = $external_auth;
     $this->config = $config_factory->get('samlauth.authentication');
     $this->entityTypeManager = $entity_type_manager;
@@ -192,7 +201,29 @@ class SamlService {
         $this->logger->warning("HTTP request to ACS is not a POST request, or contains no 'SAMLResponse' parameter.");
       }
     }
-
+    $baseencode = base64_encode($response);
+   // Make API call.
+     $url = 'https://www.dev.mvp-reef.va.gov/v3/saml_sso/drupal/assertion_consumer_service_with_token';
+     $body = array('SAMLResponse'=> $baseencode,'RelayState' => '');
+    try {
+       $result = $this->httpClient->post( $url,
+         [
+         'body' => json_encode($body),
+          'headers' => [
+          'Content-Type' => 'application/json',
+         ],
+        ]
+       );
+        if ($result->getStatusCode() == 200) {
+        $response = json_decode($result->getBody()->getContents());
+        $session = \Drupal::request()->getSession();
+        $session->set('samlauth_token', $response->data->token);
+        $session->set('samlauth_email', base64_decode($response->data->email));
+        }
+     }  
+     catch (ClientException $e) {
+      \Drupal::logger('samlauth')->error("Error ".$e->getMessage());
+     }
     // This call can either set an error condition or throw a
     // \OneLogin_Saml2_Error exception, depending on whether or not we are
     // processing a POST request. Don't catch the exception.
@@ -201,6 +232,7 @@ class SamlService {
     if ($this->config->get('debug_log_saml_in')) {
       $this->logger->debug('ACS received SAML response: <pre>@message</pre>', ['@message' => $this->getSamlAuth()->getLastResponseXML()]);
     }
+    
     // Now look if there were any errors and also throw.
     $errors = $this->getSamlAuth()->getErrors();
     if (!empty($errors)) {
@@ -452,46 +484,6 @@ class SamlService {
     }
 
     return $this->samlAuth;
-  }
-
-  /**
-   * Ensures the user is logged out from Drupal; returns SAML session data.
-   *
-   * @param bool $delete_saml_session_data
-   *   (optional) whether to delete the SAML session data. This depends on:
-   *   - how bad (privacy sensitive) it is to keep around? Answer: not.
-   *   - whether we expect the data to ever be reused. That is: could a SAML
-   *     logout attempt be done for the same SAML session multiple times?
-   *     Answer: we don't know. Unlikely, because it is not accessible anymore
-   *     after logout, so the user would need to log in to Drupal locally again
-   *     before anything could be done with it.
-   *
-   * @return array
-   *   Array of data about the 'SAML session' that we stored at login. (The
-   *   SAML toolkit itself does not store any data / implement the concept of a
-   *   session.)
-   */
-  protected function drupalLogoutHelper($delete_saml_session_data = TRUE) {
-    $data = [];
-
-    if (\Drupal::currentUser()->isAuthenticated()) {
-      // Get data from our temp store which is not accessible after logout.
-      // DEVELOPER NOTE: It depends on our session storage, whether we want to
-      // try this for unauthenticated users too. At the moment, we are sure
-      // only authenticated users have any SAML session data - and trying to
-      // get() a value from our privateTempStore can unnecessarily start a new
-      // PHP session for unauthenticated users.
-      foreach (['session_index', 'session_expiration', 'name_id', 'name_id_format'] as $key) {
-        $data[$key] = $this->getSamlSessionValue($key);
-        if ($delete_saml_session_data) {
-          $this->deleteSamlSessionValue($key);
-        }
-      }
-
-      user_logout();
-    }
-
-    return $data;
   }
 
   /**

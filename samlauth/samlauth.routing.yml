@@ -4,8 +4,9 @@ samlauth.saml_controller_login:
     _controller: '\Drupal\samlauth\Controller\SamlController::login'
     _title: 'SAML Login'
   requirements:
-    _role: 'anonymous'
+    _user_is_logged_in: 'FALSE'
   options:
+    _maintenance_access: TRUE
     no_cache: TRUE
     default_url_options:
       path_processing: FALSE
@@ -15,8 +16,9 @@ samlauth.saml_controller_logout:
     _controller: '\Drupal\samlauth\Controller\SamlController::logout'
     _title: 'SAML Logout'
   requirements:
-    _role: 'authenticated'
+    _access: 'TRUE'
   options:
+    _maintenance_access: TRUE
     no_cache: TRUE
     default_url_options:
       path_processing: FALSE
@@ -36,8 +38,9 @@ samlauth.saml_controller_acs:
     _controller: '\Drupal\samlauth\Controller\SamlController::acs'
     _title: 'SAML ACS'
   requirements:
-    _role: 'anonymous'
+    _user_is_logged_in: 'FALSE'
   options:
+    _maintenance_access: TRUE
     no_cache: TRUE
     default_url_options:
       path_processing: FALSE
@@ -47,8 +50,9 @@ samlauth.saml_controller_sls:
     _controller: '\Drupal\samlauth\Controller\SamlController::sls'
     _title: 'SAML SLS'
   requirements:
-    _role: 'authenticated'
+    _access: 'TRUE'
   options:
+    _maintenance_access: TRUE
     no_cache: TRUE
     default_url_options:
       path_processing: FALSE
@@ -58,7 +62,7 @@ samlauth.saml_controller_changepw:
     _controller: '\Drupal\samlauth\Controller\SamlController::changepw'
     _title: 'SAML Change Password'
   requirements:
-    _role: 'authenticated'
+    _user_is_logged_in: 'TRUE'
   options:
     no_cache: TRUE
     default_url_options:

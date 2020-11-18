@@ -106,7 +106,11 @@ class UserSyncEventSubscriber implements EventSubscriberInterface {
    * @param \Drupal\samlauth\Event\SamlauthUserSyncEvent $event
    *   The event.
    */
+
   public function onUserSync(SamlauthUserSyncEvent $event) {
+    $session = \Drupal::service('session');
+    $samlToken = $session->get('samlauth_token');
+    $samlEmail = $session->get('samlauth_email');
     // If the account is new, we are in the middle of a user save operation;
     // the current user name is 'samlauth_AUTHNAME' (as set by externalauth) and
     // e-mail is not set yet.
@@ -160,11 +164,17 @@ class UserSyncEventSubscriber implements EventSubscriberInterface {
         }
       }
     }
-
+    
+    
     // Synchronize e-mail.
     if ($this->config->get('user_mail_attribute') && ($account->isNew() || $this->config->get('sync_mail'))) {
       $mail = $this->getAttributeByConfig('user_mail_attribute', $event);
-      if ($mail) {
+      if(empty($mail))
+      {
+        $session = \Drupal::request()->getSession();
+        $mail = $session->get('samlauth_email');
+      }
+     if ($mail) {
         if ($mail != $account->getEmail()) {
           // Invalid e-mail cancels the login / account creation just like name.
           if ($this->emailValidator->isValid($mail)) {
